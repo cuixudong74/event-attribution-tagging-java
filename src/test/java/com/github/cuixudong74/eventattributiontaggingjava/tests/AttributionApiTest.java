@@ -103,4 +103,30 @@ class AttributionApiTest {
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$[?(@.reason == 'INCREMENTAL')]").exists());
     }
+
+    @Test
+    void missingTagSourceAndVersionedReadsRemainAccepted() throws Exception {
+        mockMvc.perform(post("/api/tags").param("actor", "missing-source-user")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"userId\":\"missing-source-user\",\"channel\":\"web\",\"key\":\"seg\","
+                                + "\"value\":\"accepted\",\"priority\":1}"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.value").value("accepted"))
+                .andExpect(jsonPath("$.source").doesNotExist());
+
+        mockMvc.perform(get("/api/tags").param("actor", "missing-source-user")
+                        .param("userId", "missing-source-user").param("channel", "web").param("key", "seg"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.value").value("accepted"));
+
+        mockMvc.perform(get("/api/snapshot").param("version", "0"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.version").value(0));
+        mockMvc.perform(get("/api/reconciliation").param("version", "0"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.balanced").value(true));
+        mockMvc.perform(get("/api/revisions").param("version", "0"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$").isArray());
+    }
 }

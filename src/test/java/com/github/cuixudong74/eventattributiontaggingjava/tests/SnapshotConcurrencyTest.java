@@ -5,6 +5,7 @@ import com.github.cuixudong74.eventattributiontaggingjava.event.EventStatus;
 import com.github.cuixudong74.eventattributiontaggingjava.event.EventType;
 import com.github.cuixudong74.eventattributiontaggingjava.facade.AttributionService;
 import com.github.cuixudong74.eventattributiontaggingjava.result.AttributionResult;
+import com.github.cuixudong74.eventattributiontaggingjava.result.AttributionRevision;
 import com.github.cuixudong74.eventattributiontaggingjava.result.Reconciliation;
 import com.github.cuixudong74.eventattributiontaggingjava.snapshot.Snapshot;
 import org.junit.jupiter.api.Test;
@@ -97,5 +98,109 @@ class SnapshotConcurrencyTest {
                         + finalReconciliation.getUnauthorized());
         assertTrue(finalReconciliation.getDuplicates() > 0);
         assertTrue(queries.get() > 0);
+    }
+
+    @Test
+    void concurrentRevisionReadsUseOneSelfConsistentSnapshotVersion() throws Exception {
+        AttributionService service = AttributionTestSupport.service();
+        service.grantConsent("u1");
+
+        int writers = 4;
+        int readers = 6;
+        int batchesPerWriter = 40;
+        ExecutorService pool = Executors.newFixedThreadPool(writers + readers);
+        CountDownLatch start = new CountDownLatch(1);
+        List<Future<?>> futures = new ArrayList<>();
+
+        for (int writer = 0; writer < writers; writer++) {
+            final int seed = writer * batchesPerWriter;
+            futures.add(pool.submit(() -> {
+                try {
+                    start.await();
+                    for (int i = 0; i < batchesPerWriter; i++) {
+                        int n = seed + i;
+                        service.ingest(List.of(AttributionTestSupport.event(
+                                "revision-e" + n, EventType.CONVERSION, "u1", null, "web", 1_000L + n)));
+                    }
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                }
+            }));
+        }
+
+        AtomicLong pinnedReads = new AtomicLong();
+        for (int reader = 0; reader < readers; reader++) {
+            futures.add(pool.submit(() -> {
+                try {
+                    start.await();
+                    List<Long> previousRevisionIds = List.of();
+                    long previousVersion = 0L;
+                    for (int i = 0; i < 100; i++) {
+                        Snapshot latest = service.snapshot();
+                        if (latest.getVersion() > previousVersion) {
+                            List<Long> currentIds = revisionIds(latest.getRevisions());
+                            int common = Math.min(previousRevisionIds.size(), currentIds.size());
+                            assertEquals(previousRevisionIds.subList(0, common), currentIds.subList(0, common),
+                                    "修订历史只能追加，不能回退或丢失");
+                            previousRevisionIds = currentIds;
+                            previousVersion = latest.getVersion();
+                        }
+
+                        if (latest.getVersion() > 0) {
+                            long version = latest.getVersion();
+                            Snapshot pinnedSnapshot = service.snapshot(version);
+                            Reconciliation pinnedReconciliation = service.reconciliation(version);
+                            List<AttributionRevision> pinnedRevisions = service.revisions(version);
+
+                            assertEquals(version, pinnedSnapshot.getVersion());
+                            pinnedReads.incrementAndGet();
+                            assertTrue(sameReconciliation(pinnedSnapshot.getReconciliation(), pinnedReconciliation),
+                                    "对账口径必须与快照版本一致");
+                            assertEquals(revisionIds(pinnedSnapshot.getRevisions()), revisionIds(pinnedRevisions),
+                                    "修订历史必须与快照版本一致");
+                            assertStableOrder(pinnedSnapshot.getRevisions());
+                            assertEquals(revisionIds(pinnedSnapshot.getRevisions()),
+                                    revisionIds(service.revisions(version)),
+                                    "同一版本重复读取必须返回相同历史");
+                        }
+                    }
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                }
+            }));
+        }
+
+        start.countDown();
+        for (Future<?> future : futures) {
+            future.get();
+        }
+        pool.shutdown();
+
+        assertTrue(pinnedReads.get() > 0);
+        Snapshot finalSnapshot = service.snapshot();
+        assertEquals(writers * batchesPerWriter, finalSnapshot.getResults().size());
+        assertStableOrder(finalSnapshot.getRevisions());
+        assertEquals(finalSnapshot.getRevisions(), service.revisions(finalSnapshot.getVersion()));
+    }
+
+    private static List<Long> revisionIds(List<AttributionRevision> revisions) {
+        return revisions.stream().map(AttributionRevision::getRevisionId).toList();
+    }
+
+    private static void assertStableOrder(List<AttributionRevision> revisions) {
+        long previousId = 0L;
+        for (AttributionRevision revision : revisions) {
+            assertTrue(revision.getRevisionId() > previousId, "修订 ID 必须严格递增");
+            previousId = revision.getRevisionId();
+            revision.getDiffs().forEach(diff -> assertTrue(diff != null));
+        }
+    }
+
+    private static boolean sameReconciliation(Reconciliation left, Reconciliation right) {
+        return left.getTotalReceived() == right.getTotalReceived()
+                && left.getDuplicates() == right.getDuplicates()
+                && left.getLinked() == right.getLinked()
+                && left.getUnlinked() == right.getUnlinked()
+                && left.getUnauthorized() == right.getUnauthorized();
     }
 }

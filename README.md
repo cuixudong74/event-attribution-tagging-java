@@ -52,17 +52,26 @@
 ## 5. 并发模型（采集与查询）
 
 - 摄入在 `ingestLock` 内串行完成：去重 → 追加日志 → 重建身份图 → 状态判定 → 全量重算 → 生成修订 → 整体发布。
+- 事件日志使用线程安全的只追加结构；重算开始时取得当时事件列表的不可变副本，采集期间继续到达的事件不影响本次发布。
 - 查询永远读取 `SnapshotHolder` 中的 `volatile` 不可变快照（`Snapshot`）：
   快照内结果、事件状态、对账口径、修订历史自洽一致，**不会读到中间状态**；
   查询期间到达的事件在下一个快照中可见，不丢失。
+- 每次发布的快照都会保留版本号。需要同时读取快照、对账口径和修订历史时，先调用一次 `/api/snapshot`
+  取得 `version`，再携带同一个 `?version=` 调用其他查询接口；这些接口会返回同一个不可变版本中的数据。
+  不传 `version` 时保持默认行为，读取发布时的最新版本。
+- 修订历史只随新快照追加，修订 ID 单调递增；固定版本重复读取得到完全相同的列表，旧条目不会回退或丢失。
 - 快照版本单调递增；总量对账恒等式：
   `totalReceived = linked + unlinked + unauthorized + duplicates`。
 
 ## 6. 标签
 
 - 标签按 `(userId, channel)` 维护，含 `key/value/priority/source/updatedAt`。
-- 覆盖规则：**优先级高者覆盖低优先级**；同优先级以较新写入为准；写入时间相同则按来源字典序打破平局（确定性行为）。
-- 合并通过 `ConcurrentHashMap.merge` 原子完成，重复写入与并发更新不会留下互相矛盾的标签。
+- 覆盖规则：**优先级高者覆盖低优先级**；同优先级以较新写入时间为准。
+- 写入时间相同且优先级相同时，按 `source` 字典序决胜；缺少 `source` 是合法输入，按空字符串参与比较。
+  若来源仍相同，再按标签名和值字典序决胜，从而为同一批输入提供唯一、可复现的结果。
+- 合并始终在一次原子比较更新中选择一个完整的 `Tag` 对象，不会把不同请求的字段拼接成矛盾结果；
+  不同 `(userId, channel)` 之间互不影响。
+- 并发写入的返回值是该键当时合并后的完整标签；未成为最终胜者的写入也已参与合并，不会被静默丢弃。
 
 ## 7. 隐私授权
 
@@ -76,9 +85,9 @@
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
 | POST | `/api/events` | 批量摄入事件（数组），返回 `accepted/duplicates/snapshotVersion` |
-| GET | `/api/snapshot` | 当前不可变快照（结果、状态、对账、修订） |
-| GET | `/api/reconciliation` | 总量对账口径（聚合） |
-| GET | `/api/revisions` | 归因修订历史与逐项差异 |
+| GET | `/api/snapshot?version=` | 当前或指定版本的不可变快照（结果、状态、对账、修订） |
+| GET | `/api/reconciliation?version=` | 当前或指定版本的总量对账口径（聚合） |
+| GET | `/api/revisions?version=` | 当前或指定版本的归因修订历史与逐项差异 |
 | GET | `/api/users/{userId}?actor=` | 用户级归因明细（需鉴权） |
 | POST | `/api/tags?actor=` | 写入标签（按优先级合并） |
 | GET | `/api/tags?actor=&userId=&channel=&key=` | 读取标签（需鉴权） |
@@ -91,8 +100,8 @@
 - `AttributionModelTest`：首次/末次/时间加权语义、窗口边界、跨实例可复现。
 - `DedupAndLateEventTest`：重复去重、乱序到达、迟到事件修正与差异追溯、窗外事件不修正。
 - `IdentityResolutionTest`：匿名事件标记、跨设备/渠道身份合并、不可关联事件不丢弃。
-- `SnapshotConcurrencyTest`：多线程并发摄入与查询，事件不丢、快照自洽、版本单调。
-- `TagStoreTest`：优先级覆盖、同优先级新写入胜、幂等、并发无矛盾。
+- `SnapshotConcurrencyTest`：多线程并发摄入与查询，事件不丢、快照自洽、版本单调；并验证采集与修订历史读取交错时，固定版本的快照、对账、修订完全一致，历史稳定只追加。
+- `TagStoreTest`：优先级覆盖、同优先级新写入胜、幂等、缺少来源、写入时间相同、多用户多渠道并发写入、最终胜者与串行确定性合并一致且为完整对象。
 - `PrivacyAndReconciliationTest`：未授权不进入归因但可对账、授权后重算、越权读取拒绝、对账恒等式。
 - `ConfigValidationTest`：非法/冲突配置逐项拒绝、热加载确定性重算、失败保持原配置。
 - `AttributionApiTest`：REST 全流程（摄入、对账、快照、403 鉴权、400 非法参数、标签、配置热加载）。

@@ -121,6 +121,14 @@ public class AttributionService {
     }
 
     /**
+     * @param version 需要读取的快照版本；为 null 时读取最新版本
+     * @return 指定版本的不可变快照
+     */
+    public Snapshot snapshot(Long version) {
+        return version == null ? snapshots.get() : requireSnapshot(version);
+    }
+
+    /**
      * 读取某用户的归因明细（用户级数据，需鉴权）。
      */
     public List<AttributionResult> userResults(String actor, String userId) {
@@ -131,17 +139,41 @@ public class AttributionService {
     }
 
     /**
-     * @return 总量对账口径（聚合数据，无需用户级鉴权）
+     * @return 最新快照的总量对账口径（聚合数据，无需用户级鉴权）
      */
     public Reconciliation reconciliation() {
         return snapshots.get().getReconciliation();
     }
 
     /**
-     * @return 归因修订历史（修正前后差异可追溯）
+     * @param version 需要读取的快照版本；为 null 时读取最新版本
+     * @return 指定快照中的总量对账口径
+     */
+    public Reconciliation reconciliation(Long version) {
+        return (version == null ? snapshots.get() : requireSnapshot(version)).getReconciliation();
+    }
+
+    /**
+     * @return 最新已发布快照中的归因修订历史（修正前后差异可追溯）
      */
     public List<AttributionRevision> revisions() {
-        return List.copyOf(revisions);
+        return snapshots.get().getRevisions();
+    }
+
+    /**
+     * @param version 需要读取的快照版本；为 null 时读取最新版本
+     * @return 指定快照中的归因修订历史
+     */
+    public List<AttributionRevision> revisions(Long version) {
+        return (version == null ? snapshots.get() : requireSnapshot(version)).getRevisions();
+    }
+
+    private Snapshot requireSnapshot(long version) {
+        Snapshot snapshot = snapshots.get(version);
+        if (snapshot == null) {
+            throw new IllegalArgumentException("Unknown snapshot version: " + version);
+        }
+        return snapshot;
     }
 
     /**

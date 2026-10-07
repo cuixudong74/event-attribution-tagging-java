@@ -6,8 +6,12 @@ import com.github.cuixudong74.eventattributiontaggingjava.tag.TagStore;
 import org.junit.jupiter.api.Test;
 
 import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -95,6 +99,94 @@ class TagStoreTest {
         assertTrue(value.matches("v\\d+-\\d+"));
         // 再次读取结果稳定
         assertEquals(value, store.get(key).orElseThrow().getValue());
+    }
+
+    @Test
+    void missingSourceIsAcceptedAndHasDeterministicTieBreak() {
+        Tag missingSource = tag("seg", "missing", 5, null, 1_000L);
+        Tag namedSource = tag("seg", "named", 5, "src-a", 1_000L);
+
+        TagStore missingFirst = new TagStore();
+        missingFirst.put(new TagKey("u1", "web"), missingSource);
+        Tag firstWinner = missingFirst.put(new TagKey("u1", "web"), namedSource);
+
+        TagStore namedFirst = new TagStore();
+        namedFirst.put(new TagKey("u1", "web"), namedSource);
+        Tag secondWinner = namedFirst.put(new TagKey("u1", "web"), missingSource);
+
+        assertEquals(namedSource, firstWinner);
+        assertEquals(namedSource, secondWinner);
+        assertEquals(namedSource, missingFirst.get(new TagKey("u1", "web")).orElseThrow());
+        assertEquals(namedSource, namedFirst.get(new TagKey("u1", "web")).orElseThrow());
+    }
+
+    @Test
+    void concurrentWritesAcrossUsersAndChannelsUseIndependentDeterministicWinners() throws Exception {
+        TagStore store = new TagStore();
+        String[] users = {"u1", "u2", "u3", "u4"};
+        String[] channels = {"web", "mobile", "email"};
+        int threads = 12;
+        int writesPerThread = 100;
+        Map<TagKey, List<Tag>> candidatesByKey = new HashMap<>();
+        for (int item = 0; item < threads * writesPerThread; item++) {
+            String userId = users[item % users.length];
+            String channel = channels[item % channels.length];
+            String source = item % 5 == 0 ? null : "src-" + (item % 4);
+            Tag candidate = tag("seg", "v-" + item, 5, source, 1_000L + item % 7);
+            candidatesByKey.computeIfAbsent(new TagKey(userId, channel), ignored -> new ArrayList<>()).add(candidate);
+        }
+
+        TagStore expectedStore = new TagStore();
+        Map<TagKey, Tag> expectedWinners = new HashMap<>();
+        for (Map.Entry<TagKey, List<Tag>> entry : candidatesByKey.entrySet()) {
+            Tag winner = null;
+            for (Tag candidate : entry.getValue()) {
+                winner = expectedStore.put(entry.getKey(), candidate);
+            }
+            expectedWinners.put(entry.getKey(), winner);
+        }
+
+        ExecutorService pool = Executors.newFixedThreadPool(threads);
+        CountDownLatch start = new CountDownLatch(1);
+        List<Future<List<Tag>>> futures = new ArrayList<>();
+
+        for (int t = 0; t < threads; t++) {
+            final int seed = t;
+            futures.add(pool.submit(() -> {
+                start.await();
+                List<Tag> written = new ArrayList<>();
+                for (int i = 0; i < writesPerThread; i++) {
+                    int item = seed * writesPerThread + i;
+                    Tag candidate = tag("seg", "v-" + item, 5,
+                            item % 5 == 0 ? null : "src-" + (item % 4), 1_000L + item % 7);
+                    TagKey key = new TagKey(users[item % users.length], channels[item % channels.length]);
+                    written.add(store.put(key, candidate));
+                }
+                return written;
+            }));
+        }
+
+        start.countDown();
+        Set<Tag> returnedTags = new HashSet<>();
+        for (Future<List<Tag>> future : futures) {
+            returnedTags.addAll(future.get());
+        }
+        pool.shutdown();
+
+        for (String user : users) {
+            for (String channel : channels) {
+                TagKey key = new TagKey(user, channel);
+                Tag expected = expectedWinners.get(key);
+                Tag current = store.get(key).orElseThrow();
+                assertEquals(expected.getValue(), current.getValue(), "并发胜者必须与输入集合的确定性胜者一致");
+                assertEquals(expected.getKey(), current.getKey());
+                assertEquals(expected.getSource(), current.getSource());
+                assertEquals(expected.getPriority(), current.getPriority());
+                assertEquals(expected.getUpdatedAt(), current.getUpdatedAt());
+                assertTrue(returnedTags.contains(current), "最终标签必须来自某次完整写入");
+                assertEquals(current.getValue(), store.get(key).orElseThrow().getValue());
+            }
+        }
     }
 
     @Test

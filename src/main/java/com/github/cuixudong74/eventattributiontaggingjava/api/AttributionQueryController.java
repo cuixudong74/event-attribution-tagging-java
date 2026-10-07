@@ -27,18 +27,18 @@ public class AttributionQueryController {
     }
 
     @GetMapping("/snapshot")
-    public Snapshot snapshot() {
-        return service.snapshot();
+    public Snapshot snapshot(@RequestParam(required = false) Long version) {
+        return service.snapshot(version);
     }
 
     @GetMapping("/reconciliation")
-    public Reconciliation reconciliation() {
-        return service.reconciliation();
+    public Reconciliation reconciliation(@RequestParam(required = false) Long version) {
+        return service.reconciliation(version);
     }
 
     @GetMapping("/revisions")
-    public List<AttributionRevision> revisions() {
-        return service.revisions();
+    public List<AttributionRevision> revisions(@RequestParam(required = false) Long version) {
+        return service.revisions(version);
     }
 
     @GetMapping("/users/{userId}")
