@@ -138,10 +138,12 @@ public class AttributionService {
     }
 
     /**
-     * @return 归因修订历史（修正前后差异可追溯）
+     * @return 归因修订历史（修正前后差异可追溯）。
+     * 读取自当前不可变快照：与同一时刻的归因结果、对账口径同属一个版本，
+     * 采集并发进行时也不会读到中间状态或抛异常；历史只增不减，已返回的条目不会回退。
      */
     public List<AttributionRevision> revisions() {
-        return List.copyOf(revisions);
+        return snapshots.get().getRevisions();
     }
 
     /**

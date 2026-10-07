@@ -103,4 +103,28 @@ class AttributionApiTest {
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$[?(@.reason == 'INCREMENTAL')]").exists());
     }
+
+    @Test
+    void tagWriteWithoutSourceIsAcceptedOverHttp() throws Exception {
+        // 不携带 source 字段的写入是合法输入：必须返回 200 且生效结果完整可读
+        mockMvc.perform(post("/api/tags").param("actor", "u9")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"userId\":\"u9\",\"channel\":\"web\",\"key\":\"seg\","
+                                + "\"value\":\"nosrc\",\"priority\":1}"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.value").value("nosrc"));
+
+        // 同优先级同来源（均缺失）的后续写入也能正常合并，不得报服务端错误
+        mockMvc.perform(post("/api/tags").param("actor", "u9")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"userId\":\"u9\",\"channel\":\"web\",\"key\":\"seg\","
+                                + "\"value\":\"nosrc2\",\"priority\":1}"))
+                .andExpect(status().isOk());
+
+        // 读取结果与最终生效写入一致
+        mockMvc.perform(get("/api/tags").param("actor", "u9")
+                        .param("userId", "u9").param("channel", "web").param("key", "seg"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.value").value("nosrc2"));
+    }
 }
